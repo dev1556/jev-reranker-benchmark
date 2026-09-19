@@ -51,3 +51,36 @@ def test_mrr_no_hit_within_k_is_zero() -> None:
 def test_graded_relevance_uses_gain() -> None:
     # grade 2 -> gain 2**2-1 = 3 at rank 1; IDCG identical -> 1.0
     assert ndcg_at_k(["a"], {"a": 2}, 1) == pytest.approx(1.0)
+
+
+def test_ndcg_duplicate_doc_ids_do_not_inflate_score() -> None:
+    """A ranker repeating one doc_id must not score a perfect nDCG."""
+    # dedupe(["d1","d1","d1"]) -> ["d1"]; DCG = 1/log2(2) = 1.0
+    # IDCG = 1/log2(2) + 1/log2(3) + 1/log2(4) = 2.13093 (three relevant docs exist)
+    # nDCG = 1.0 / 2.13093 = 0.46928 -- not 1.0
+    assert ndcg_at_k(["d1", "d1", "d1"], REL, 3) == pytest.approx(0.46928, abs=1e-5)
+
+
+def test_precision_duplicate_doc_ids_uses_distinct_docs_in_window() -> None:
+    # dedupe(["d1","d1","d3","d4"]) -> ["d1","d3","d4"]; top-2 = ["d1","d3"], both relevant
+    # precision = 2/2 = 1.0 (not 1/2, which is what re-slicing before dedupe would give)
+    assert precision_at_k(["d1", "d1", "d3", "d4"], REL, 2) == pytest.approx(1.0)
+
+
+def test_mrr_duplicate_doc_ids_shift_rank() -> None:
+    # dedupe(["x","x","d1"]) -> ["x","d1"]; d1 is now rank 2, not rank 3
+    assert mrr_at_k(["x", "x", "d1"], REL, 3) == pytest.approx(1 / 2)
+
+
+def test_negative_k_returns_zero_for_all_metrics() -> None:
+    assert ndcg_at_k(RANKED, REL, -1) == 0.0
+    assert recall_at_k(RANKED, REL, -1) == 0.0
+    assert precision_at_k(RANKED, REL, -1) == 0.0
+    assert mrr_at_k(RANKED, REL, -1) == 0.0
+
+
+def test_zero_k_returns_zero_for_all_metrics() -> None:
+    assert ndcg_at_k(RANKED, REL, 0) == 0.0
+    assert recall_at_k(RANKED, REL, 0) == 0.0
+    assert precision_at_k(RANKED, REL, 0) == 0.0
+    assert mrr_at_k(RANKED, REL, 0) == 0.0
