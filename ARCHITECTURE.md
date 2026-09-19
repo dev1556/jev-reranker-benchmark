@@ -164,6 +164,7 @@ and one place for the dev/test discipline to be visibly enforced.
 
 ```
 src/
+  types.py          shared frozen dataclasses (Query, Doc, Scored, ...)
   config.py         tuned constants, one frozen dataclass
   data.py           BEIR load, splits, seeded sampling
   embed.py          OpenAI embeddings + cache, cosine top-k
@@ -172,6 +173,7 @@ src/
   gating.py         the four selection policies
   unanswerable.py   H5 set construction
   robustness.py     H6 injection + rank-inflation
+  ablations.py      FR-9: rubric sensitivity, determinism, structural invariant
   metrics.py        IR + calibration      (pure; human review required)
   stats.py          bootstrap, randomisation test, Holm  (pure; human review required)
   report.py         CSV → plots → report.md
@@ -182,6 +184,9 @@ cache/              LFS-tracked API responses
 data/               datasets, embeddings, derived sets  (gitignored except manifests)
 results/            CSVs, plots, report.md  (committed — they're the deliverable)
 ```
+
+`types.py` lives outside `rerankers.py` because `data.py` and `embed.py` need `Query`/`Doc` and must
+not import the arms.
 
 `rerankers.py` is the file most likely to outgrow itself. When it does, split it per-arm into
 `src/arms/` rather than letting it become the place everything hides.
