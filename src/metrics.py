@@ -11,6 +11,7 @@ per-query argument these functions actually take.
 """
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -105,3 +106,101 @@ def mrr_at_k(ranked_ids: Sequence[str], relevant: Mapping[str, int], k: int) -> 
         if doc_id in positives:
             return 1.0 / i
     return 0.0
+
+
+@dataclass(frozen=True)
+class Bin:
+    lo: float
+    hi: float
+    mean_pred: float
+    frac_pos: float
+    count: int
+
+
+@dataclass(frozen=True)
+class BrierDecomposition:
+    brier: float
+    reliability: float
+    resolution: float
+    uncertainty: float
+
+
+def _equal_mass_edges(probs: np.ndarray, n_bins: int) -> np.ndarray:
+    """Quantile bin edges. Equal-mass rather than equal-width because reranker
+    probabilities pile up near 0 — equal-width bins would leave most bins empty
+    and understate ECE."""
+    qs = np.linspace(0, 1, n_bins + 1)
+    edges = np.quantile(probs, qs)
+    edges[0], edges[-1] = -np.inf, np.inf
+    return np.unique(edges)
+
+
+def reliability_bins(probs: np.ndarray, labels: np.ndarray, n_bins: int = 15) -> list[Bin]:
+    """Partition predictions into equal-mass bins of (mean predicted, observed frequency)."""
+    probs, labels = np.asarray(probs, float), np.asarray(labels, int)
+    if probs.size == 0:
+        return []
+    edges = _equal_mass_edges(probs, n_bins)
+    idx = np.clip(np.digitize(probs, edges[1:-1], right=False), 0, len(edges) - 2)
+    out: list[Bin] = []
+    for b in range(len(edges) - 1):
+        mask = idx == b
+        if not mask.any():
+            continue
+        out.append(
+            Bin(
+                lo=float(edges[b]),
+                hi=float(edges[b + 1]),
+                mean_pred=float(probs[mask].mean()),
+                frac_pos=float(labels[mask].mean()),
+                count=int(mask.sum()),
+            )
+        )
+    return out
+
+
+def ece(probs: np.ndarray, labels: np.ndarray, n_bins: int = 15) -> float:
+    """Expected Calibration Error: sum_b (n_b/N) * |mean_pred_b - frac_pos_b|.
+
+    Naeini et al. (2015), equal-mass binning.
+    """
+    bins = reliability_bins(probs, labels, n_bins)
+    n = int(np.asarray(probs).size)
+    if n == 0 or not bins:
+        return float("nan")
+    return float(sum(b.count / n * abs(b.mean_pred - b.frac_pos) for b in bins))
+
+
+def brier_decomposition(
+    probs: np.ndarray, labels: np.ndarray, n_bins: int = 15
+) -> BrierDecomposition:
+    """Brier score with Murphy's (1973) reliability-resolution-uncertainty split."""
+    probs, labels = np.asarray(probs, float), np.asarray(labels, int)
+    brier = float(np.mean((probs - labels) ** 2))
+    base = float(labels.mean()) if labels.size else float("nan")
+    bins = reliability_bins(probs, labels, n_bins)
+    n = probs.size
+    rel = sum(b.count / n * (b.mean_pred - b.frac_pos) ** 2 for b in bins)
+    res = sum(b.count / n * (b.frac_pos - base) ** 2 for b in bins)
+    return BrierDecomposition(brier, float(rel), float(res), base * (1 - base))
+
+
+def auroc(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Area under the ROC curve via the rank (Mann-Whitney U) identity.
+
+    Returns NaN when only one class is present — undefined, and saying so is
+    safer than returning a plausible-looking 0.5.
+    """
+    scores, labels = np.asarray(scores, float), np.asarray(labels, int)
+    n_pos, n_neg = int((labels == 1).sum()), int((labels == 0).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    order = np.argsort(scores, kind="mergesort")
+    ranks = np.empty_like(order, dtype=float)
+    ranks[order] = np.arange(1, scores.size + 1)
+    # average ranks within ties, so tied scores cannot inflate the statistic
+    _, inv, counts = np.unique(scores, return_inverse=True, return_counts=True)
+    sums = np.zeros(counts.size)
+    np.add.at(sums, inv, ranks)
+    ranks = (sums / counts)[inv]
+    return float((ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
