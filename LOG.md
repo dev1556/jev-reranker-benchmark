@@ -144,3 +144,15 @@ init for `cache/**`, `uv init` on 3.12, CI workflow, then build order per the pl
 - FiQA at 300 sampled queries vs. the full 648 — user's call, deferred.
 - Composition weights (0.35/0.65) are a guess; one dev tuning pass, then frozen.
 - Listwise Jev variant using `Choice` deliberately deferred to future work.
+
+## Task 7: data.py (BEIR loading, splits, tuning guard)
+
+Implemented `src/data.py` and `tests/test_data.py` per task-7-brief.md.
+`tuning_context()` uses a ContextVar reset in `finally`, so an exception
+inside the context cannot leave the test-split guard latched on.
+
+**SciFact real-load check (2026-09-19):** `load_corpus("scifact", CONFIG)`
+against live HuggingFace (`BeIR/scifact`) returned exactly
+**5183 docs / 300 queries / 300 qrels** — matches the expected count with no
+drift. Field names (`_id`, `text`, `title`, `query-id`, `corpus-id`, `score`)
+matched the brief's assumptions exactly; no adaptation needed.
