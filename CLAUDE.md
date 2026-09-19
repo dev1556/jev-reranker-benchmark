@@ -1,0 +1,162 @@
+# CLAUDE.md — operating rules for this repo
+
+Calibration-aware RAG reranker benchmark. We measure whether TypeSafe Jev's `Score` probabilities
+are honest enough to decide **how many** chunks a RAG pipeline keeps and **whether to answer at all**,
+against four rival rerankers on two BEIR datasets.
+
+The output is a public writeup. **Every number in this repo may end up in front of strangers who
+want it to be wrong.** That fact drives most of the rules below.
+
+## Read before touching anything
+
+1. `BRD.md` — the approved spec. Hypotheses, arms, metrics, policies. **Approved 2026-09-19; it is
+   the contract.** Deviating from it needs a human decision, not a judgement call.
+2. `ARCHITECTURE.md` — how the code is laid out and why.
+3. `TECH_REQUIREMENTS.md` — the concrete build targets.
+4. `LOG.md` — **read the last 3 entries before starting work.** This is how a fresh session learns
+   what already happened, what broke, and what was decided.
+
+## Non-negotiables
+
+These are not style preferences. Violating one invalidates the published result.
+
+**1. Never tune on test.** Rubric wording, thresholds (`τ`, `c_low`), composition weights, and the
+Platt calibrator are fitted on **dev only**. The test split is run once per `prompt_version`. If you
+find yourself thinking "let me just check whether a different τ scores better on test" — that is the
+failure mode. Stop.
+
+**2. Hypotheses are pre-registered.** H1–H7 and their accept thresholds are fixed in `BRD.md` §2 and
+were written before any result existed. Do not soften a threshold, drop a hypothesis, or reframe a
+null as a win. If Jev loses, the report says Jev lost.
+
+**3. Every reported number carries a CI.** Point estimates alone do not ship. Arm comparisons use the
+paired randomisation test in `src/stats.py` with Holm correction. "No significant difference" is a
+valid, publishable result and must be stated as such rather than described as a near-win.
+
+**4. All five arms get equal effort.** The subject of a benchmark is not its favourite. If arm C's
+prompt is lazy while arm D's is carefully tuned, the benchmark is worthless. Rival arms get the same
+care as the Jev arm — that is what makes a win mean anything.
+
+**5. Stamp everything.** Results rows carry `prompt_version`, `model`, `dataset`, `split`, `seed`,
+and the git SHA. An unstamped number cannot be defended later.
+
+## Tooling
+
+**`uv` is the only package manager.** Never `pip`, never bare `python`.
+
+```bash
+uv sync                          # install from the lockfile
+uv run python -m src.bench ...   # run anything
+uv run pytest
+uv add <pkg>                     # add a dep (commits pyproject.toml + uv.lock together)
+```
+
+**Python is pinned to 3.12** (`requires-python = ">=3.12,<3.13"`). Not a preference — torch has no
+3.13/3.14 wheels, and arm B dies without it. `uv` fetches 3.12 itself; do not "fix" this by relaxing
+the pin.
+
+`uv.lock` is committed and authoritative. Never hand-edit it.
+
+## Git workflow
+
+**`main` is protected by convention — never commit to it directly.** Every change goes:
+
+```bash
+git switch -c feat/<short-slug>      # or fix/, docs/, chore/, exp/
+# ... work, commit in logical units ...
+git push -u origin feat/<short-slug>
+gh pr create --fill                  # description explains WHY, not just what
+```
+
+Branch prefixes: `feat/` new capability · `fix/` bug · `docs/` markdown only · `chore/` tooling/deps ·
+`exp/` an experiment that may never merge.
+
+**Merge policy — self-merge is earned, not assumed.**
+
+I self-merge a PR when **all** of these hold: CI is green, the change is routine, and it does not
+touch the list below. Otherwise the PR stops and waits for the user.
+
+**Always stops for human review:**
+- rubric text or question definitions (`src/rerankers.py` Jev prompts) — this is the experiment itself
+- composition weights, `τ`, `c_low`, or any tuned constant
+- anything in `src/metrics.py` or `src/stats.py` — a subtly wrong metric silently poisons every
+  downstream number, and it is the hardest error to notice later
+- the conclusions or verdicts in `results/report.md`
+- any deviation from `BRD.md`
+- dependency additions
+- anything touching `.env`, secrets, or CI permissions
+
+When in doubt, it stops. The cost of an unnecessary review is minutes; the cost of a bad merged
+metric is the whole result.
+
+**Commits:** imperative subject, explain *why* in the body when it isn't obvious. Small and logical
+beats one giant blob. Never `--no-verify`.
+
+## Subagents and worktrees
+
+If work is parallelised across subagents, **each subagent gets its own git worktree.** Never two
+agents in one working directory — they will clobber each other's files and produce a corrupted diff
+nobody can untangle.
+
+```bash
+git worktree add ../rr-<task-slug> -b feat/<task-slug>   # create
+# agent works entirely inside ../rr-<task-slug>
+# PR raised from that branch, reviewed, merged to main
+git worktree remove ../rr-<task-slug>                    # MANDATORY after merge
+git branch -d feat/<task-slug>
+```
+
+**Worktree cleanup is not optional.** After the PR merges, the worktree is removed and the branch
+deleted in the same turn. Leaving stale worktrees around produces sessions that edit a directory that
+no longer reflects `main`, which wastes an hour before anyone notices.
+
+`git worktree list` should show only the main checkout when no subagent is running. If it shows
+more, something was left behind — clean it up before starting new work.
+
+Worktrees share one `.git`, so the LFS cache is shared too. Fine, but never run `uv sync` in two
+worktrees at once against the same venv path; each worktree gets its own `.venv`.
+
+## LOG.md — the memory
+
+**Append an entry to `LOG.md` at the end of every work session, and before any handoff or compaction.**
+This is the mechanism that stops a fresh Claude session from starting at zero. It is not a changelog —
+`git log` already exists and is better at that.
+
+What belongs in it: decisions and their reasoning, things that broke and why, numbers observed,
+dead ends worth not repeating, and the current state of play. What does not: a restatement of the
+diff.
+
+Format is defined at the top of `LOG.md`. Newest entries go at the **top**.
+
+A session that produced no entry is a session whose context is lost. Treat writing it as part of the
+work, not as paperwork after it.
+
+## Code conventions
+
+- **Boring over clever.** This is measurement code. Someone will audit it looking for a bug that
+  flatters the conclusion. Make that audit easy.
+- Type hints on every public function. `ruff check` and `ruff format` clean before every PR.
+- One module, one job (see `ARCHITECTURE.md`). When a file starts doing two things, split it.
+- **No silent failures in measurement paths.** A swallowed exception in a metric becomes a wrong
+  number in a public chart. Raise, log loudly, or record the failure as data — never `except: pass`.
+- Randomness is seeded and the seed is recorded. Default `seed=42`, threaded through explicitly,
+  never read from global state.
+- Docstrings on metric functions state the formula and cite a source. Cheap to write, and it is the
+  first thing a skeptical reader checks.
+
+## Cost and API discipline
+
+- **Check the cache before every API-spending run.** Cached responses are free; an accidental cold
+  rerun of the Haiku arm is ~$12.
+- `make smoke` (25 queries, ~$0.50) before any full run. Always.
+- Never commit `.env`. `.env.example` documents the three required keys:
+  `TYPESAFE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+- Concurrency is capped by semaphore (default 16). Do not raise it to "go faster" — 429s cost more
+  wall-clock than they save.
+- Cached responses live in Git LFS. `git lfs pull` before assuming the cache is missing; a cold run
+  triggered by an un-pulled LFS pointer is an expensive and entirely avoidable mistake.
+
+## Repo
+
+`github.com/dev1556/<repo>` · public from the first commit, deliberately — the commit history is the
+evidence that the hypotheses were written before the results existed.
