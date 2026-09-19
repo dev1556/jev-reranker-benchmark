@@ -3,11 +3,26 @@
 The guard is the mechanism behind non-negotiable #1: code running inside
 `tuning_context()` cannot read the test split at all. Discipline that depends
 on remembering is discipline that eventually fails.
+
+Scope of the guard, established by execution rather than assumption:
+- It PROPAGATES into `asyncio` tasks created inside the context, because
+  asyncio copies the current `contextvars.Context` into new tasks — this is
+  the case that matters here, since the benchmark fires ~50 concurrent async
+  calls per query.
+- It does NOT propagate into a raw `threading.Thread` started inside the
+  context, because Python does not copy ContextVar state across OS threads;
+  code in such a thread would see the default and be allowed through. No
+  thread is used in this project today — this is recorded so a future change
+  to threads doesn't silently disable the protection.
+- It only protects callers that go through `get_split`. `Corpus.queries` is a
+  plain public dict, so any code holding a `Corpus` can read test-split
+  queries directly and bypass the guard entirely. It's a tripwire for honest
+  mistakes, not a security boundary.
 """
 
 import json
 import random
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Literal
@@ -23,7 +38,7 @@ class TestSplitAccessError(RuntimeError):
 
 
 @contextmanager
-def tuning_context():
+def tuning_context() -> Iterator[None]:
     """Mark a region as tuning. Test-split access inside it raises."""
     token = _TUNING.set(True)
     try:
