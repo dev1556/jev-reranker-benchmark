@@ -26,6 +26,9 @@ def cache_key(
     prompt_version is included so a rubric edit invalidates visibly rather than
     silently reusing answers produced by different wording.
     """
+    # Unescaped "|" separator is safe only because every field is a controlled
+    # internal identifier (arm names, model ids, BEIR doc ids, prompt_version)
+    # and none of them contain "|". Do not pass free-form text through here.
     raw = "|".join((arm, model, dataset, query_id, doc_id, prompt_version))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -42,15 +45,11 @@ class ResponseCache:
     def _path(self, key: str, arm: str = "misc") -> Path:
         return self.root / arm / key[:2] / f"{key}.json"
 
-    def _find(self, key: str) -> Path | None:
-        hits = list(self.root.rglob(f"{key}.json"))
-        return hits[0] if hits else None
-
-    def get(self, key: str) -> dict | None:
+    def get(self, key: str, arm: str = "misc") -> dict | None:
         if not self.enabled:
             return None
-        path = self._find(key)
-        if path is None:
+        path = self._path(key, arm)
+        if not path.exists():
             self._stats.misses += 1
             return None
         try:
@@ -67,6 +66,10 @@ class ResponseCache:
     def put(self, key: str, value: dict, arm: str = "misc") -> None:
         path = self._path(key, arm)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Two concurrent put() calls for the same key would race on this same
+        # .tmp path. Unreachable today (concurrent calls within a run use
+        # distinct doc_id/arm and so distinct keys), and identical keys imply
+        # identical content anyway, so no lock is added.
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(value), encoding="utf-8")
         tmp.replace(path)  # atomic: a killed run never leaves a partial file

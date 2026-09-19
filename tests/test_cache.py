@@ -64,6 +64,17 @@ def test_stats_track_hits_and_misses(tmp_path) -> None:
     assert (s.hits, s.misses, s.writes) == (1, 1, 1)
 
 
+def test_get_uses_arm_to_find_entry_directly_not_by_scanning(tmp_path) -> None:
+    """get() must resolve the shard path directly from (key, arm) — never fall
+    back to a tree-wide scan, which would reintroduce O(n) lookups at scale."""
+    c = ResponseCache(tmp_path)
+    c.put("k", {"v": 1}, arm="jev")
+    assert c.get("k", arm="jev") == {"v": 1}
+    # Wrong arm must miss even though the entry exists elsewhere in the tree —
+    # proves get() is not scanning for the file by name.
+    assert c.get("k", arm="misc") is None
+
+
 def test_corrupt_entry_raises_rather_than_returning_none(tmp_path) -> None:
     """A truncated LFS pointer or partial write must not look like a cache miss —
     that would silently trigger a $12 cold rerun."""
