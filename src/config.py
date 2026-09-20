@@ -16,6 +16,12 @@ class Config:
     # its test queries, so both datasets carry the same query budget and neither
     # dominates a pooled result. Not a tuned value — a scope decision.
     FIQA_N_QUERIES: int = 300
+    # BRD §8: per query, 5 genuinely irrelevant chunks are injected, and the
+    # damage is read as the nDCG@10 drop — the same k as the headline table, so
+    # the robustness cost is comparable to the accuracy numbers. Fixed by the
+    # spec, not tuned.
+    N_INJECTED_PER_QUERY: int = 5
+    NDCG_K: int = 10
     SEMAPHORE: int = 16
     N_BOOTSTRAP: int = 10_000
     N_PERMUTATIONS: int = 10_000
