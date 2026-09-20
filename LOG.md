@@ -33,6 +33,118 @@ out to be, what numbers were observed, and which dead ends are not worth walking
 
 ---
 
+## 2026-09-20 - H5/H6 modules merged; Task 16 briefed but NOT started
+
+**State:** Tasks 1-15 are merged to `main` (PRs #1-#23). 162 tests passing. Every measurement module
+exists: metrics, calibration metrics, stats, cache, data, embeddings, six arms (A cosine, B
+cross-encoder, C Haiku, D Jev composed, D-prime jev_cookbook, E Platt), gating, unanswerable sets,
+robustness probe. **No API call has ever been made. Nothing has been measured. `.env` does not exist
+on this machine.**
+
+**Task 16 is split in two and neither half is started.** Both workers were killed by the session
+ending before they wrote a single file; the `../rr-run-infra` and `../rr-bench-cli` worktrees exist,
+are clean, and sit at `9bfd9e7`. Nothing to salvage, nothing lost. The two briefs were written to a
+temp scratchpad, which is not durable, so the substance of both is recorded below - **re-dispatch
+from this section if the briefs are gone.**
+
+### Task 16a - run infrastructure (`embed.py`, `rerankers.py`, `data.py`)
+
+Four things the real run cannot happen without:
+
+1. **`build_pools_and_sims(corpus, queries, embedder, cfg) -> (pools, sims)`** in `embed.py`, where
+   `sims[query_id][doc_id]` is the cosine similarity that picked the pool. `build_pools` keeps its
+   current signature as a thin wrapper. Arm A consumes `sims` and nothing produces it today.
+2. **`OpenAIEmbedder` has no cache** - the original plan's docstring claimed `.npz` caching that was
+   never implemented. FiQA is 57,638 passages re-embedded on every cold run, and the published
+   reproduce path cannot work without a key at all. Cache to `cfg.DATA_DIR/"embeddings"/{key}.npz`,
+   key = sha256 over `EMBED_MODEL` plus the exact texts in order, atomic write (temp file then
+   `os.replace`, matching `cache.py`), zero API calls on a hit.
+3. **Arm C is sequential.** 50 candidates x ~210 test queries x 2 datasets is ~21,000 serial Haiku
+   calls, roughly six hours per dataset, while arm D already runs concurrently - the arms are not
+   even comparable on latency. `ThreadPoolExecutor(max_workers=cfg.SEMAPHORE)` inside `rerank`,
+   output order unchanged (`(-score, doc_id)`), one failure must not abort its siblings. Do not raise
+   `SEMAPHORE`.
+4. **FiQA sampling is not wired.** `sample_query_ids` exists and nothing calls it, so FiQA would run
+   all 648 judged queries. Apply `cfg.FIQA_N_QUERIES` sampling inside `get_split`, **before** the
+   dev/test partition, so every consumer sees the same 300 and no caller can forget. SciFact
+   unaffected.
+
+### Task 16b - the CLI (`bench.py`). Five defects in the plan's draft
+
+Each one changes the results CSV, which every chart and verdict is built from:
+
+1. **`sims` was a dict of zeros.** Arm A ranks on those values, so every document ties, the ranking
+   collapses to doc_id order, `p_relevant` is 0.5 everywhere - and it still gets published as "the
+   cosine baseline". Use real sims, plus a runtime assertion that a query's sims are not all
+   identical, so a regression to placeholders fails loudly instead of looking plausible.
+2. **Arm E is never fitted** and raises until `.fit()` runs. `run()` must fit it on the **dev** split
+   even when the run is `--split test` (non-negotiable #1). Labels are qrels grade > 0.
+3. **Ranking metrics were emitted once per policy** - four identical rows differing only in the
+   `policy` column, which a chart reads as a policy effect. Ranking metrics go out once with
+   `policy="none"`; per-policy rows carry `mean_kept`, `abstention_rate`, `mean_words_forwarded`.
+4. **Every row was stamped `model=JEV_MODEL`**, so arm B's and arm C's rows would claim to come from
+   the Jev model. Each arm stamps its own: cosine/platt to `EMBED_MODEL`, cross_encoder to
+   `CROSS_ENCODER`, llm to `LLM_MODEL`, jev/jev_cookbook to `JEV_MODEL`.
+5. **`ARM_NAMES` was missing `jev_cookbook`.**
+
+Plus: latency and token columns (`latency_p50`, `latency_p95`, `input_tokens_total`,
+`output_tokens_total`, `n_calls`) aggregated from `Scored.meta`, **with no dollar conversion** - Jev's
+price per token is not known to this repo and an invented price in a public chart is worse than no
+chart. Task 17 does money from a documented table.
+
+**Decided:**
+
+- **`mean_words_forwarded`, not "tokens forwarded".** BRD's headline table says tokens; a real
+  tokenizer is a new dependency for a number only ever compared *between arms over identical text*.
+  Whitespace words are the honest proxy, so the metric is named for what it measures and the docstring
+  says why. Task 17 can label it "tokens (whitespace proxy)".
+- **H6 targets only genuinely irrelevant documents**, 5 per query per BRD section 8, not one uniform
+  pick from the pool. A random pick can land on an already-relevant, already-top document that has
+  nowhere to rise; it contributes ~0 inflation and drags the mean down, reading as robustness no arm
+  earned.
+- **H6's nDCG delta is at k=10**, matching the headline table, not at pool length, which is not
+  comparable across pools of different size. `N_INJECTED_PER_QUERY=5` and `NDCG_K=10` are now named
+  constants in `config.py`.
+- **Self-merge is live** and works: PRs #21-#23 were merged by me on green CI. `gh pr merge` is no
+  longer blocked by the sandbox classifier.
+
+**Broke / learned:**
+
+- **A cost bug in H5 worth remembering as a pattern.** `build_gold_removed` stripped the corpus and
+  called `build_pools` per query, which re-embeds the whole corpus each time: 300 FiQA queries over
+  57,638 passages is ~17M embedding calls instead of 57,638. Fixed to embed once and drop gold by
+  index; verified byte-identical pools against the naive version with no gold leakage, plus a test
+  asserting two embed calls total regardless of query count. **The pattern: any per-query loop that
+  calls a corpus-level function is a cost bug until proven otherwise.**
+- **A worktree created before a merge does not contain that merge.** `rr-robustness` predated the
+  `FIQA_N_QUERIES` commit, so a config edit anchored on that line silently no-op'd and three tests
+  failed with `AttributeError`. Rebase a worker's worktree onto current `main` before editing config.
+- Every spec bug found so far is the same shape: **a test double that does not match production.**
+  Four for four across arms B, C, D and the H5/H6 modules.
+
+**Numbers:** 162 tests. bge logits `[2.848, -7.643]` on a relevant/irrelevant pair, still the only
+real model output observed. Zero API spend to date.
+
+**Next, in order:**
+
+1. Re-dispatch Tasks 16a and 16b (briefs above). They touch disjoint files and run in parallel; 16b
+   codes against 16a's `build_pools_and_sims` signature without waiting for it.
+2. `make smoke` - **the first real spend.** Needs `.env` with `TYPESAFE_API_KEY`,
+   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`. 25 queries, ~$0.50. Record actual spend, wall-clock, cache
+   hit rate, any 429s, and the resolved `response.model` for Haiku. **If spend exceeds $2, stop.**
+3. Task 17 (report, charts, H1-H7 verdicts), Task 18 (ablations), Task 19 (Streamlit and README).
+
+**Open:**
+- `.env` absent. Ask the user for it when the smoke run is actually ready, not before.
+- Tuned constants all still placeholders pending the dev tuning pass: `W_TOPICAL`/`W_ANSWERS`, `TAU`,
+  `C_LOW`, `MASS_TARGET`, `TAU_WIDE`, `TAU_NARROW`.
+- `results/report.md` owes a restatement of H1-H7 (the BRD is unpublished) and both approved BRD
+  deviations: the claim-vs-question rubric rewording, and the added `jev_cookbook` arm.
+- OneDrive intermittently locks `.git` and fails object writes. After **any** failed git command,
+  check `git branch --show-current` before retrying - that is how a commit landed on `main` earlier.
+
+---
+
 ## 2026-09-20 — Arms C and D, and a rubric that only fitted one dataset
 
 **State:** All five arms exist plus a sixth variant. Open: #17 (haiku model id), #18 (arm C), #19
