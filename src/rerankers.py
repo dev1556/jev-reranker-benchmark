@@ -4,6 +4,8 @@ score orders the ranking; p_relevant is a probability claim the calibration
 metrics hold the arm to. They are separate fields on purpose - see types.py.
 """
 
+import asyncio
+import os
 import re
 import time
 from collections.abc import Sequence
@@ -13,7 +15,7 @@ import numpy as np
 
 from src.cache import ResponseCache, cache_key
 from src.config import Config
-from src.prompts import LLM_RERANK_PROMPT
+from src.prompts import JEV_QUESTIONS_V1, JEV_STATE, LLM_RERANK_PROMPT
 from src.types import Doc, Query, Scored
 
 
@@ -336,4 +338,277 @@ class LLMReranker:
                         meta=r,
                     )
                 )
+        return sorted(scored, key=lambda s: (-s.score, s.doc_id))
+
+
+class JevAnswer(Protocol):
+    """Duck-typed contract for one value of `SystemOneResponse.answers`: the
+    real `ScoreAnswer`/`NoulAnswer` pydantic models in production, a plain
+    dict already shaped like their `.model_dump()` in tests."""
+
+    def model_dump(self) -> dict: ...
+
+
+class JevClient(Protocol):
+    """Duck-typed contract for whatever `JevReranker.client` holds: the real
+    `typesafe_sdk.TypeSafeClient` in production, a fake in tests."""
+
+    def system_one(self, state: str, questions: dict, model: str = "") -> object: ...
+
+
+def _dump(answer: object) -> dict:
+    """Boundary between the SDK's typed `ScoreAnswer`/`NoulAnswer` objects and
+    the plain JSON-serialisable dicts everything downstream (the cache,
+    `compose_relevance`, the fakes in tests) works with.
+
+    A real answer has `.model_dump()`; a test double that already hands back
+    a plain dict does not, and passes through unchanged (task-12 delta #2).
+    """
+    if hasattr(answer, "model_dump"):
+        return answer.model_dump()
+    return dict(answer)
+
+
+def _int_keyed(probabilities: dict) -> dict[int, float]:
+    """Normalise a Score's `probabilities` to int keys.
+
+    The SDK types this `dict[int, float]`, but the wire format and a JSON
+    cache round-trip both force string keys - so a cache MISS (fresh
+    `.model_dump()`) and a cache HIT (`json.loads`) hand this function
+    different key types for what must be the same distribution (task-12
+    delta #1). Not normalising here would make p_relevant depend on whether
+    this is the first or second time a query has been scored.
+    """
+    return {int(k): float(v) for k, v in probabilities.items()}
+
+
+def compose_relevance(answers: dict, cfg: Config) -> tuple[float, float, float]:
+    """Combine Jev's three pre-registered atomic answers into
+    (score, p_relevant, confidence), per BRD §4.4.
+
+    Composition happens here, in code, rather than by asking Jev one broad
+    question - TypeSafe's guidance is to decompose and compose, and their
+    documented "indirection" weakness is why.
+
+    Each Score is normalised by its OWN maximum level: topical_overlap has
+    four levels (max 3), answers_query has three (max 2). Dividing both by
+    the same constant would silently mis-weight them.
+
+    Only `topical_overlap` and `answers_query` are read. `is_contradictory`
+    and the cookbook-recipe `cookbook_relevant` (orchestrator addition) are
+    carried through to `Scored.meta` for the separate `jev_cookbook` arm and
+    for analysis, but must never move this arm's score - a document that
+    contradicts the query's claim is directly relevant to deciding it, and
+    answers_query's own top level already says so ("supporting it or
+    contradicting it").
+    """
+    topical = answers["topical_overlap"]
+    answers_q = answers["answers_query"]
+
+    topical_probs = _int_keyed(topical["probabilities"])
+    answers_probs = _int_keyed(answers_q["probabilities"])
+    n_topical = max(topical_probs)
+    n_answers = max(answers_probs)
+
+    score = cfg.W_TOPICAL * (topical["score"] / n_topical) + cfg.W_ANSWERS * (
+        answers_q["score"] / n_answers
+    )
+
+    # P(relevant) = mass on the top two levels of answers_query: "partial or
+    # indirect evidence" and "settles the claim". A refuting document lands
+    # in the top level, which is correct - it IS relevant.
+    top_two = sorted(answers_probs)[-2:]
+    p_relevant = float(min(1.0, max(0.0, sum(answers_probs[k] for k in top_two))))
+
+    return float(score), p_relevant, float(answers_q["confidence"])
+
+
+class JevReranker:
+    """Arm D. TypeSafe Jev `Score`/`Noul`, one call per (query, chunk) pair.
+
+    **This is the subject of the benchmark.** Parallelism comes from
+    ~cfg.SEMAPHORE concurrent calls, never from stuffing all candidates into
+    one state: Jev's documented weakness #5 is that accuracy falls as the
+    state fills with content unrelated to the decision, and their own
+    reranking cookbook says the same thing independently ("one request per
+    candidate - no request sees another").
+
+    Each call asks four questions over the one-pair state: the three
+    pre-registered ones `compose_relevance` combines, plus `cookbook_relevant`
+    for the separate `jev_cookbook` arm - independent questions over one
+    state run in parallel, so this costs tokens but not an extra request.
+
+    Failures (API exception, or any answer this arm's contract does not
+    expect) are recorded as data (`meta["error"]`) and excluded
+    (`meta["excluded"] = True`), never scored 0.0 - matching arm C. Failures
+    are cached too: the published reproduce path is `git lfs pull && make
+    report` with no API keys, so an uncached failure would make a warm-cache
+    run attempt a live call and die.
+    """
+
+    name = "jev"
+
+    def __init__(
+        self,
+        cfg: Config,
+        cache: ResponseCache,
+        client: JevClient | None = None,
+        dataset: str = "",
+    ) -> None:
+        self.cfg = cfg
+        self.cache = cache
+        self.dataset = dataset
+        self._injected_client = client
+        if client is None:
+            if not os.environ.get("TYPESAFE_API_KEY"):
+                raise RuntimeError("TYPESAFE_API_KEY is not set; arm D needs it")
+            from typesafe_sdk import TypeSafeClient
+
+            client = TypeSafeClient(api_key=os.environ["TYPESAFE_API_KEY"])
+        self.client = client
+
+    def _cache_key(self, query: Query, doc: Doc) -> str:
+        return cache_key(
+            self.name,
+            self.cfg.JEV_MODEL,
+            self.dataset,
+            query.query_id,
+            doc.doc_id,
+            self.cfg.PROMPT_VERSION,
+        )
+
+    def _judge(self, query: Query, doc: Doc) -> dict:
+        """Run (or fetch from cache) one four-question call. Returns either
+        the four dumped answers plus `latency_s` on success, or
+        {"error": str, "latency_s": float} on any failure - callers must
+        branch on "error" in the result, never assume the question keys."""
+        key = self._cache_key(query, doc)
+        # `arm=self.name` on BOTH get and put - passing different values
+        # (or the `misc` default) reads and writes different shard files,
+        # which would make every "cache hit" silently a miss.
+        cached = self.cache.get(key, arm=self.name)
+        if cached is not None:
+            return cached
+        state = JEV_STATE.format(query=query.text, document=doc.text[:4000])
+        started = time.perf_counter()
+        try:
+            resp = self.client.system_one(
+                state=state, questions=JEV_QUESTIONS_V1, model=self.cfg.JEV_MODEL
+            )
+            payload = {q: _dump(a) for q, a in resp.answers.items()}
+            payload["latency_s"] = time.perf_counter() - started
+        except Exception as exc:  # recorded, never silently zeroed
+            payload = {
+                "error": f"{type(exc).__name__}: {exc}",
+                "latency_s": time.perf_counter() - started,
+            }
+        self.cache.put(key, payload, arm=self.name)
+        return payload
+
+    async def _judge_all(self, query: Query, candidates: Sequence[Doc]) -> list[dict]:
+        from typesafe_sdk import AsyncTypeSafeClient
+
+        sem = asyncio.Semaphore(self.cfg.SEMAPHORE)
+        async with AsyncTypeSafeClient(api_key=os.environ["TYPESAFE_API_KEY"]) as client:
+
+            async def one(doc: Doc) -> dict:
+                key = self._cache_key(query, doc)
+                cached = self.cache.get(key, arm=self.name)
+                if cached is not None:
+                    return cached
+                state = JEV_STATE.format(query=query.text, document=doc.text[:4000])
+                started = time.perf_counter()
+                async with sem:
+                    try:
+                        resp = await client.system_one(
+                            state=state, questions=JEV_QUESTIONS_V1, model=self.cfg.JEV_MODEL
+                        )
+                        payload = {q: _dump(a) for q, a in resp.answers.items()}
+                        payload["latency_s"] = time.perf_counter() - started
+                    except Exception as exc:
+                        payload = {
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "latency_s": time.perf_counter() - started,
+                        }
+                self.cache.put(key, payload, arm=self.name)
+                return payload
+
+            return list(await asyncio.gather(*(one(d) for d in candidates)))
+
+    def _judge_batch(self, query: Query, candidates: Sequence[Doc]) -> list[dict]:
+        """Raw per-doc four-question results, shared by this arm and
+        `JevCookbookReranker` so the fourth question rides the same cached
+        call instead of doubling API spend. Concurrency is an implementation
+        detail: `rerank` stays synchronous so latency is measured identically
+        across all five arms (ARCHITECTURE.md §3)."""
+        if self._injected_client is None:
+            return asyncio.run(self._judge_all(query, candidates))
+        return [self._judge(query, d) for d in candidates]
+
+    def rerank(self, query: Query, candidates: Sequence[Doc]) -> list[Scored]:
+        results = self._judge_batch(query, candidates)
+        scored: list[Scored] = []
+        for doc, r in zip(candidates, results, strict=True):
+            if "error" in r:
+                scored.append(
+                    Scored(
+                        doc_id=doc.doc_id,
+                        score=float("-inf"),
+                        p_relevant=0.0,
+                        confidence=None,
+                        meta={**r, "excluded": True},
+                    )
+                )
+                continue
+            score, p, conf = compose_relevance(r, self.cfg)
+            scored.append(
+                Scored(doc_id=doc.doc_id, score=score, p_relevant=p, confidence=conf, meta=dict(r))
+            )
+        return sorted(scored, key=lambda s: (-s.score, s.doc_id))
+
+
+class JevCookbookReranker:
+    """TypeSafe's own reranking-cookbook design (docs.typesafe.ai/cookbooks/
+    rerank_typesafe.md, orchestrator addition approved 2026-09-20): one Noul
+    per (query, chunk), sorted descending, no composition, no weights.
+
+    Reuses `JevReranker`'s judge calls and cache verbatim - the fourth
+    question (`cookbook_relevant`) runs inside the SAME state/call as the
+    three pre-registered ones, so this arm never issues a second request. It
+    reads only `cookbook_relevant`; `compose_relevance` reads only the other
+    three. The two are measured, and can rank, independently - that is the
+    whole point of running both from one call: if the composed arm loses, the
+    rebuttal is "you didn't follow their recipe"; if it wins, this arm is
+    there to ask whether the tuned weights did the work.
+
+    `confidence` is always None: a Noul has no separate confidence field
+    distinct from the probability itself (see the primitives doc).
+    """
+
+    name = "jev_cookbook"
+
+    def __init__(self, jev: JevReranker) -> None:
+        self.jev = jev
+
+    def rerank(self, query: Query, candidates: Sequence[Doc]) -> list[Scored]:
+        results = self.jev._judge_batch(query, candidates)
+        scored: list[Scored] = []
+        for doc, r in zip(candidates, results, strict=True):
+            if "error" in r:
+                scored.append(
+                    Scored(
+                        doc_id=doc.doc_id,
+                        score=float("-inf"),
+                        p_relevant=0.0,
+                        confidence=None,
+                        meta={**r, "excluded": True},
+                    )
+                )
+                continue
+            noul = float(r["cookbook_relevant"]["noul"])
+            scored.append(
+                Scored(
+                    doc_id=doc.doc_id, score=noul, p_relevant=noul, confidence=None, meta=dict(r)
+                )
+            )
         return sorted(scored, key=lambda s: (-s.score, s.doc_id))
