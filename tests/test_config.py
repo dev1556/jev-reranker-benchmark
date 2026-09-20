@@ -19,6 +19,9 @@ def test_config_defaults_match_spec() -> None:
     assert CONFIG.SEMAPHORE == 16
     assert CONFIG.PROMPT_VERSION == "v1"
     assert pytest.approx(1.0) == CONFIG.W_TOPICAL + CONFIG.W_ANSWERS
+    # BRD §4.1: 300 FiQA queries sampled from test, matching SciFact's 300, so a
+    # pooled result is not dominated by one dataset.
+    assert CONFIG.FIQA_N_QUERIES == 300
 
 
 def test_scored_rejects_out_of_range_probability() -> None:

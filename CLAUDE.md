@@ -77,14 +77,19 @@ gh pr create --fill                  # description explains WHY, not just what
 Branch prefixes: `feat/` new capability · `fix/` bug · `docs/` markdown only · `chore/` tooling/deps ·
 `exp/` an experiment that may never merge.
 
-**Merge policy — self-merge is earned, not assumed.**
+**Merge policy — self-merge authorised 2026-09-20.**
 
-I self-merge a PR when **all** of these hold: CI is green, the change is routine, and it does not
-touch the list below. Otherwise the PR stops and waits for the user.
+I merge my own PRs once CI is green. This replaced the earlier stop-and-wait policy after the first
+nine PRs; the user granted it explicitly.
 
-**Always stops for human review:**
-- rubric text or question definitions (`src/rerankers.py` Jev prompts) — this is the experiment itself
-- composition weights, `τ`, `c_low`, or any tuned constant
+What has *not* changed is the list below. These items still get the reasoning written out in the PR
+body and an entry in `LOG.md` before the merge, because the point of that list was never the wait —
+it was the record. A reviewer coming later must be able to see what was decided and why without
+reading the diff.
+
+**Reasoning is written out in full for:**
+- rubric text or question definitions (`src/prompts.py`, the Jev questions) — this is the experiment
+- composition weights, `τ`, `c_low`, `TAU_WIDE`, `TAU_NARROW`, or any tuned constant
 - anything in `src/metrics.py` or `src/stats.py` — a subtly wrong metric silently poisons every
   downstream number, and it is the hardest error to notice later
 - the conclusions or verdicts in `results/report.md`
@@ -92,8 +97,14 @@ touch the list below. Otherwise the PR stops and waits for the user.
 - dependency additions
 - anything touching `.env`, secrets, or CI permissions
 
-When in doubt, it stops. The cost of an unnecessary review is minutes; the cost of a bad merged
-metric is the whole result.
+**Still stops and asks, regardless of the merge authority:** anything that would change a
+pre-registered hypothesis or its accept threshold, and anything that would tune on test. Merge
+authority is not authority to move the goalposts.
+
+**Every PR targets `main` directly.** Never stack a PR on another feature branch: PR #6 was opened
+against `feat/metrics-ir`, that base was squash-merged and deleted, and GitHub then reported #6 as
+merged while none of its content had reached `main`. The Task 4 calibration metrics were missing for
+two sessions and were recovered only because the remote branch had not been pruned.
 
 **Commits:** imperative subject, explain *why* in the body when it isn't obvious. Small and logical
 beats one giant blob. Never `--no-verify`.
