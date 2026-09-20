@@ -7,7 +7,7 @@ requires human review and a prompt_version bump.
 The two arms' rubrics hold each other to CLAUDE.md non-negotiable #4 (equal
 effort for every arm): concrete self-contained levels, and an explicit ruling on
 the case a careless grader gets wrong - a document that refutes the query's
-claim is still relevant to deciding it.
+claim, or answers its question, is still relevant to settling it.
 """
 
 LLM_RERANK_PROMPT = """\
@@ -25,8 +25,8 @@ Grade the document on this scale:
 3 - The document contains evidence that settles the query, either by supporting
     it or by contradicting it.
 
-A document that contradicts the query's claim with evidence is a 3, not a 0 —
-it is directly relevant to deciding the claim.
+A document that contradicts what the query asserts or asks, with evidence, is a 3,
+not a 0 — it is directly relevant to settling the question either way.
 
 Reply with the single digit and nothing else."""
 
@@ -43,6 +43,15 @@ DOCUMENT: {document}"""
 # document; (2) a level must be judgeable on its own, without reading its
 # neighbours, or an unordered read of the rubric changes the verdict.
 #
+# DEVIATION FROM BRD §4.4, approved 2026-09-20, before any run existed: the
+# pre-registered levels were phrased in terms of the query's "claim", which fits
+# SciFact (queries are claims) but not FiQA (queries are colloquial questions).
+# Both arms would have been answering a slightly wrong question on one of the two
+# datasets, which is precisely what H7 measures. The wording is now neutral
+# between a claim and a question; every level describes the same situation it did
+# before, and the identical change was made to arm C's rubric so the arms stay
+# equal-effort. Made blind to any result: no number had been produced.
+#
 # `cookbook_relevant` is a fourth question, added on top of BRD §4.4's three
 # pre-registered ones (orchestrator addition, approved 2026-09-20): it runs
 # TypeSafe's own reranking-cookbook recipe (docs.typesafe.ai/cookbooks/
@@ -58,23 +67,23 @@ JEV_QUESTIONS_V1 = {
             "The document is in the same broad field but concerns a different "
             "subject than the query.",
             "The document concerns the query's specific subject but does not "
-            "address the claim the query is making about it.",
-            "The document is directly about the claim the query is making.",
+            "address what the query asks about it.",
+            "The document is directly about what the query asks.",
         ],
     },
     "answers_query": {
         "type": "score",
-        "instructions": "How well does the document let a reader decide the query's claim?",
+        "instructions": "How well does the document let a reader settle what the query asks?",
         "criteria": [
-            "The document contains nothing bearing on the claim.",
-            "The document contains partial or indirect evidence bearing on the claim.",
-            "The document contains evidence that settles the claim, either by "
-            "supporting it or by contradicting it.",
+            "The document contains nothing bearing on what the query asks.",
+            "The document contains partial or indirect evidence bearing on what the query asks.",
+            "The document contains evidence that settles what the query asks, "
+            "either by supporting it or by contradicting it.",
         ],
     },
     "is_contradictory": {
         "type": "noul",
-        "instructions": "This document presents evidence against the claim made in the query.",
+        "instructions": ("This document presents evidence against what the query asserts or asks."),
     },
     "cookbook_relevant": {
         "type": "noul",
