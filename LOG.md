@@ -33,6 +33,87 @@ out to be, what numbers were observed, and which dead ends are not worth walking
 
 ---
 
+## 2026-09-20 — Arms C and D, and a rubric that only fitted one dataset
+
+**State:** All five arms exist plus a sixth variant. Open: #17 (haiku model id), #18 (arm C), #19
+(arm D + cookbook variant, rebased on #18). 132 tests passing with every arm present together.
+Nothing has hit a live API yet.
+
+**Did:** Ran two more Sonnet workers (Tasks 11 and 12), reviewed both, installed the
+`typesafe@typesafe-ai` plugin and used its skill for arm D. Resolved the `src/prompts.py` /
+`src/rerankers.py` collision between the two arm branches by hand.
+
+**Decided:**
+
+- **Arm D gains a fourth question, `cookbook_relevant`, and a second arm `jev_cookbook`.** TypeSafe's
+  own reranking cookbook recommends a *single Noul*, no composition, no weights — different from
+  BRD §4.4's composed design. Running their recipe as a fourth question **in the same call** costs no
+  extra request. If the composed arm wins, this answers "the tuned weights did the work"; if it
+  loses, it answers "you did not follow their documented recipe". The cookbook also independently
+  confirms our per-pair `state` choice: "one request per candidate · no request sees another".
+- **That Noul carries `criteria: {true, false}`.** The cookbook states both conditions explicitly;
+  omitting them would have run a weaker version of TypeSafe's own recommendation than the one they
+  publish, which under the equal-effort rule biases the comparison toward the arm being checked.
+  Verified offline that the SDK accepts them.
+- **Both rubrics are now neutral between a claim and a question** — a deviation from BRD §4.4, taken
+  before any number existed. The pre-registered levels said "the claim the query is making", which
+  fits SciFact (queries *are* claims) and not FiQA (colloquial questions). Both arms C and D would
+  have been answering a slightly wrong question on one of two datasets, which is exactly what H7
+  measures. Every level describes the same situation as before; only the framing noun changed, and the
+  identical change went into arm C. `PROMPT_VERSION` stays `v1` because v1 has never been executed.
+- **Failures are cached (reversing the arm C worker).** It argued a transient 503 should not be locked
+  in permanently — fair, but the published reproduce path is `git lfs pull && make report` with no API
+  keys. An uncached failure makes a warm-cache run attempt a live call, and the arm raises without a
+  key, so one historical 503 would kill the whole reproduction and NFR-5 with it. Retrying is now an
+  explicit human action: delete the entry, re-run the arm.
+- **`LLM_MODEL` is the undated `claude-haiku-4-5`** (user's call). An alias can be repointed, but the
+  cache is keyed on the model stamp, so a repoint surfaces as a cache miss rather than silently mixed
+  results. Record the resolved `response.model` during the smoke run.
+
+**Broke / learned:**
+
+- **The same cache-shard bug appeared in both arm C's and arm D's draft code, and both workers found
+  it independently.** `cache.get(key)` defaults to `arm="misc"` while `put(key, payload, arm=name)`
+  writes to the arm's own shard, and `_path` shards on arm — so every "hit" would have missed and
+  re-called the paid API. Note the obvious cache-hit test still passes with the bug present, because a
+  miss just re-calls the same fake.
+- **Probability keys: int in the SDK, string over the wire, string after a JSON cache round-trip.** So
+  a cache *miss* and a cache *hit* would have disagreed on `p_relevant` for the same document — a
+  second run quietly reporting different numbers. Normalised to int at the boundary.
+- **The `questions`-as-plain-dicts question is settled:** the SDK types the values as model objects,
+  but `TypeAdapter(Mapping[str, Noul | Score]).validate_python({...})` coerces dicts cleanly. Checked
+  offline rather than left as an unknown for the first live run.
+- **I committed directly to `main`.** A git object write failed mid-command (OneDrive locking this
+  folder — the second occurrence), the failing command's trailing `git switch main` still ran, and my
+  retry of `add`+`commit` therefore landed on `main`. Nothing was pushed; the commit was moved to its
+  branch and `main` reset. **Lesson: after any failed git command, check `git branch --show-current`
+  before retrying.** Do not chain `git switch` after a commit in the same command.
+- **One of my own tests passed vacuously** — the `Broken` fake raised before incrementing its call
+  counter, so `assert calls == 0` could never fail. Fixed to count before raising, plus an assertion
+  that the first run really did attempt the calls. Same class of error as the plan's
+  `assert result[0] in {"long", "short"}` from the embeddings task.
+- Rebasing arm D onto arm C required resolving `prompts.py` and `rerankers.py` by hand (both branches
+  create/append the same files). My first scripted merge silently dropped `LLM_RERANK_PROMPT` and
+  mangled UTF-8 (`§` → mojibake) because it split on `"""` and let subprocess pick the encoding.
+  Redone reading blobs as bytes and stripping only the leading docstring. **Check for the constants by
+  name after any scripted merge.**
+
+**Numbers:** 132 tests. Real bge logits from the previous session still the only observed model
+output. No API spend to date.
+
+**Next:** merge #17 → #18 → #19, then Task 14 (unanswerable query sets, H5) and Task 15 (adversarial
+probe, H6), which are independent of each other. Task 16 (bench CLI) after those.
+
+**Open:**
+- `.env` does not exist locally, so no live call has ever been made. `make smoke` is the first real
+  test of arm C, arm D, and the model id in #17.
+- FiQA 300-sampled vs full 648 — still unanswered, and Task 14 onward will assume 300 unless told.
+- Tuned constants still at placeholder values: `W_TOPICAL`/`W_ANSWERS`, `TAU`, `C_LOW`, `MASS_TARGET`,
+  `TAU_WIDE`, `TAU_NARROW`.
+- `results/report.md` owes a restatement of H1–H7 and now also this rubric deviation.
+
+---
+
 ## 2026-09-20 — Arms A/B/E, gating, and two spec bugs the workers caught
 
 **State:** PRs #13 (arms A+E), #15 (arm B), #14 (gating policies) all green and waiting on review.
