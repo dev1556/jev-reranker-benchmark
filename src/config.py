@@ -11,6 +11,11 @@ class Config:
     # --- fixed, never tuned ---
     POOL_SIZE: int = 50
     SEED: int = 42
+    # FiQA has 648 test queries; BRD §4.1 samples 300 of them, seeded, and commits
+    # the sampled ids. Confirmed by the user 2026-09-20. SciFact uses all 300 of
+    # its test queries, so both datasets carry the same query budget and neither
+    # dominates a pooled result. Not a tuned value — a scope decision.
+    FIQA_N_QUERIES: int = 300
     SEMAPHORE: int = 16
     N_BOOTSTRAP: int = 10_000
     N_PERMUTATIONS: int = 10_000
