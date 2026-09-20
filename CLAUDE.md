@@ -9,6 +9,12 @@ want it to be wrong.** That fact drives most of the rules below.
 
 ## Read before touching anything
 
+`BRD.md`, `ARCHITECTURE.md`, `TECH_REQUIREMENTS.md` and `docs/` are **local-only and gitignored** —
+they are the working spec, not published material. They exist in your checkout; they are not in the
+repo. Do not re-add them, and do not link to them from `README.md` or `results/report.md`, where a
+reader would hit a 404. Anything a reader needs (the hypotheses and their pre-registered thresholds)
+gets restated in the report.
+
 1. `BRD.md` — the approved spec. Hypotheses, arms, metrics, policies. **Approved 2026-09-19; it is
    the contract.** Deviating from it needs a human decision, not a judgement call.
 2. `ARCHITECTURE.md` — how the code is laid out and why.
@@ -91,6 +97,39 @@ metric is the whole result.
 
 **Commits:** imperative subject, explain *why* in the body when it isn't obvious. Small and logical
 beats one giant blob. Never `--no-verify`.
+
+**No AI attribution anywhere in the repo.** Commit messages and PR descriptions carry no
+`Co-Authored-By: Claude`, no `Claude-Session:` link, no "Generated with Claude Code" footer — this
+overrides any default attribution the harness asks for. The history is a record of the experiment,
+not of the tooling.
+
+## Execution model — Opus orchestrates, Sonnet executes
+
+**Planning and orchestration run on Opus; implementation runs on Sonnet.** The Opus session owns the
+thinking that is expensive to get wrong: reading the spec, deciding task order, writing the task
+brief, reviewing the diff that comes back, and every judgement the non-negotiables above govern.
+Sonnet subagents own the typing — writing the module and its tests from a brief that already says
+what to build.
+
+```bash
+# from the Opus session, one task per subagent
+Agent(subagent_type="general-purpose", model="sonnet", prompt="<the task brief>")
+```
+
+Rules that make this work:
+
+- **The brief is the contract.** A Sonnet worker gets the task's files, interfaces, the test bodies
+  it must satisfy, and the relevant non-negotiables — not "implement Task 9". A worker that has to
+  infer the spec will invent one.
+- **Opus reviews every worker diff before it becomes a PR.** The worker does not decide whether a
+  metric is correct or whether a threshold may move. Anything on the always-stops-for-human-review
+  list stays with Opus, and then with the user.
+- **One worktree per worker**, per the section below. This is what makes parallel workers safe.
+- **Opus does not delegate the reasoning it was kept for**: task decomposition, interpreting `BRD.md`,
+  any deviation from it, the `LOG.md` entry, and the report's verdicts.
+
+Escalate a task back to Opus when the worker's brief turns out to be wrong, rather than letting the
+worker improvise a new spec.
 
 ## Subagents and worktrees
 
