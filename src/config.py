@@ -21,6 +21,8 @@ class Config:
     W_ANSWERS: float = 0.65
     TAU: float = 0.5
     C_LOW: float = 0.5
+    TAU_WIDE: float = 0.3  # bar when the arm is unsure: buy more context
+    TAU_NARROW: float = 0.7  # bar when it is confident AND the top P is high
     MASS_TARGET: float = 0.8
     FIXED_K: int = 5
 
