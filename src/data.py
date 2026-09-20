@@ -91,13 +91,23 @@ def split_query_ids(
 
 
 def get_split(corpus: Corpus, split: Literal["dev", "test"], cfg: Config) -> list[Query]:
-    """The only supported way to obtain queries. Guards test-split access."""
+    """The only supported way to obtain queries. Guards test-split access.
+
+    FiQA is downsampled to cfg.FIQA_N_QUERIES (BRD §4.1) *before* the dev/test
+    partition, here rather than in each caller, so every consumer — the CLI,
+    the unanswerable sets, the robustness probe — sees the same 300 ids and no
+    caller can forget the sample. SciFact (and any other corpus) passes
+    through unsampled.
+    """
     if split == "test" and _TUNING.get():
         raise TestSplitAccessError(
             "test split requested inside tuning_context(). Tune on dev only "
             "(CLAUDE.md non-negotiable #1)."
         )
-    dev_ids, test_ids = split_query_ids(list(corpus.queries), cfg.SEED)
+    query_ids = list(corpus.queries)
+    if corpus.name == "fiqa":
+        query_ids = sample_query_ids(query_ids, cfg.FIQA_N_QUERIES, seed=cfg.SEED)
+    dev_ids, test_ids = split_query_ids(query_ids, cfg.SEED)
     ids = dev_ids if split == "dev" else test_ids
     return [corpus.queries[qid] for qid in ids]
 

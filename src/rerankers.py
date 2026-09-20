@@ -9,6 +9,7 @@ import os
 import re
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
 import numpy as np
@@ -314,9 +315,19 @@ class LLMReranker:
         return payload
 
     def rerank(self, query: Query, candidates: Sequence[Doc]) -> list[Scored]:
+        """Grade every candidate concurrently, bounded by cfg.SEMAPHORE.
+
+        `ThreadPoolExecutor.map` preserves input order in its output even
+        though the calls run out of order, so `zip(candidates, results)`
+        below still pairs each doc with its own grade regardless of which
+        call finished first. `_grade` never raises - every failure path is
+        caught inside it and returned as an {"error": ...} payload - so one
+        slow or failing call cannot abort its siblings or the pool.
+        """
+        with ThreadPoolExecutor(max_workers=self.cfg.SEMAPHORE) as executor:
+            results = list(executor.map(lambda doc: self._grade(query, doc), candidates))
         scored: list[Scored] = []
-        for doc in candidates:
-            r = self._grade(query, doc)
+        for doc, r in zip(candidates, results, strict=True):
             if "error" in r:
                 scored.append(
                     Scored(
