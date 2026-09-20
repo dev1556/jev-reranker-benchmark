@@ -6,3 +6,10 @@ data/*
 !data/manifests/
 .pytest_cache/
 .ruff_cache/
+
+# Internal planning docs — local only, deliberately not published
+BRD.md
+ARCHITECTURE.md
+TECH_REQUIREMENTS.md
+docs/
+.superpowers/
