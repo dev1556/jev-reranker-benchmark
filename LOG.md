@@ -33,6 +33,75 @@ out to be, what numbers were observed, and which dead ends are not worth walking
 
 ---
 
+## 2026-09-20 — Arms A/B/E, gating, and two spec bugs the workers caught
+
+**State:** PRs #13 (arms A+E), #15 (arm B), #14 (gating policies) all green and waiting on review.
+Tasks 11 (arm C) and 12 (arm D) are next and both touch `src/rerankers.py`, so they are serial.
+
+**Did:** Ran the first three Sonnet workers under the new execution model (Task 9 inline earlier, then
+Tasks 10 and 13 in parallel worktrees). Reviewed all three diffs. Installed the `typesafe@typesafe-ai`
+plugin and validated the planned arm D integration against the live docs and the installed SDK.
+
+**Decided:**
+
+- **`TAU_WIDE = 0.3` and `TAU_NARROW = 0.7` are now named constants in `config.py`.** The draft used
+  `TAU * 0.6`, a tuned value hiding inside `gating.py`; a worker's alternative, `TAU * C_LOW`, avoided
+  the new constant but reused a *confidence* threshold as a *probability* scale. Both are worse than
+  naming the thing. `test_gated_bars_are_ordered` pins `TAU_WIDE < TAU < TAU_NARROW` so a dev tuning
+  pass cannot silently swap the meanings of widen and narrow. The user was asked and chose this.
+- **The draft's `confidence_gated` implemented only half of BRD §6** — it widened on low confidence and
+  never narrowed. Both directions now exist.
+- **`mass` sums raw `p_relevant`, not renormalised.** BRD §6 says "cumulative expected-relevance mass".
+  Renormalising makes an arm claiming 0.9 on everything indistinguishable from one claiming 0.1, which
+  destroys the exact property the policy exists to exploit.
+- **Every policy orders by the arm's own score.** A policy decides how many chunks to keep, never the
+  order. Sorting policies 2-4 by `p_relevant` would move nDCG for reasons unrelated to selection and
+  confound H1 with H3. It only differs for an arm where score and `p_relevant` are not monotone in
+  each other — arm D exactly.
+
+**Broke / learned:**
+
+- **Arm B would have shipped a double sigmoid.** `CrossEncoder.predict()` applies `Sigmoid` by default,
+  so the spec's "returns raw logits" was wrong and the implementation would have squashed an
+  already-squashed probability: a true logit of 2.85 (P=0.945) published as 0.72. Verified on the real
+  model — default `predict()` gives `[0.945, 0.00048]`, `activation_fn=Identity()` gives
+  `[2.848, -7.643]`. Fixed at construction with a stubbed-import regression test. Arm B is the
+  strongest rival, so this error ran in the direction that would have flattered the subject.
+- **Two more of the same class are waiting in Task 12**, found before writing any code and recorded in
+  the scratchpad at `task-12-api-delta.md`:
+  1. `ScoreAnswer.probabilities` is `dict[int, float]` in the SDK but string-keyed over the wire, and
+     **JSON object keys are always strings, so a cache hit and a cache miss would disagree**. The
+     plan's `probs["1"] + probs["2"]` breaks on a live response. Normalise with
+     `{int(k): float(v) ...}` at the boundary and test both key types.
+  2. `response.answers[key]` holds `ScoreAnswer` / `NoulAnswer` pydantic objects, not dicts. The
+     plan's `FakeJev` returns dicts, so composition written against dicts passes every test and fails
+     on the first live call. `JevReranker` should `model_dump()` at the client boundary.
+  Also confirmed `noul` is a probability (0.95), not a boolean, despite the SDK page's wording.
+- **Pattern worth naming: every spec bug so far was a fake that did not match production.** Arm B's
+  fake returned logits the real model does not return; arm D's fake returns dicts the real SDK does
+  not return. Any new arm's brief must include "load the real thing once and compare".
+- A `Permission denied` writing a git object during the arm B commit — OneDrive locking the repo
+  directory. Commit, push and tests all verified clean afterwards. Watch for it; the repo lives in a
+  synced folder.
+- The plugin's skill does not register until the session restarts, so its docs were read directly.
+- Switching branches after the untracking PR merged **deleted the local `BRD.md`, `ARCHITECTURE.md`,
+  `TECH_REQUIREMENTS.md` and `docs/`** — git removes files tracked in the old HEAD but absent from the
+  new one. Restored from `90a3061`. They are ignored now, so it cannot recur.
+
+**Numbers:** 87 tests passing on each of the three branches. Still no API call, nothing measured.
+Real-model check on bge: logits `[2.848, -7.643]` for a relevant/irrelevant pair — sane.
+
+**Next:** merge #13 → #15 → #14, then Task 11 (arm C, Haiku) and Task 12 (arm D, Jev) with the API
+deltas folded into the brief. Invoke the `typesafe:typesafe-ai` skill when writing arm D.
+
+**Open:**
+- `TAU_WIDE`/`TAU_NARROW` join `W_TOPICAL`/`W_ANSWERS` and `TAU`/`C_LOW`/`MASS_TARGET` as placeholders
+  awaiting the dev tuning pass.
+- FiQA 300-sampled vs full 648 — still unanswered.
+- `results/report.md` owes a restatement of H1-H7 now that `BRD.md` is unpublished.
+
+---
+
 ## 2026-09-20 — Lost calibration metrics, repo hygiene, Task 9
 
 **State:** Tasks 1-3 and 5-8 on main. Task 4 (calibration metrics) was **not** on main and had to be
