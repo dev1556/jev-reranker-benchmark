@@ -33,6 +33,58 @@ out to be, what numbers were observed, and which dead ends are not worth walking
 
 ---
 
+## 2026-09-20 — Lost calibration metrics, repo hygiene, Task 9
+
+**State:** Tasks 1-3 and 5-8 on main. Task 4 (calibration metrics) was **not** on main and had to be
+recovered — PR #11. Task 9 (arms A and E) is implemented and green but unpushed, waiting on #11.
+PR #10 (untracking the spec docs) is green and waiting on the user.
+
+**Did:** Untracked `BRD.md`, `ARCHITECTURE.md`, `TECH_REQUIREMENTS.md` and `docs/` and gitignored them
+plus `.superpowers/`. Added two CLAUDE.md rules: no AI attribution in commits or PRs, and the
+Opus-orchestrates / Sonnet-executes execution model. Removed the four stale worktrees. Dispatched the
+first Sonnet worker (Task 9) and reviewed its diff.
+
+**Decided:**
+
+- **Spec docs stay local.** They remain in history at `b2cb4b8`, so the pre-registration claim is still
+  checkable from the log, but nothing in the repo links to them. Consequence recorded in CLAUDE.md: the
+  hypotheses and their accept thresholds must be restated in `results/report.md`, because a reader can
+  no longer be pointed at `BRD.md` §2.
+- **Worker briefs must be self-contained from now on.** A new worktree contains only tracked files, so
+  a worker no longer sees the plan or the BRD at all. The Task 9 brief was an extracted copy of the
+  plan section written to the scratchpad.
+- **One ECE in the repo.** The Task 9 worker wrote a local `_ece` in its test file because
+  `src.metrics.ece` did not exist. Replaced with the real import once #11 restored it — a second ECE
+  would have let arm E be measured by a metric the report never uses.
+
+**Broke / learned:**
+
+- **The Task 4 calibration metrics were silently missing from main, and nothing flagged it.** Root
+  cause: PR #6 was opened against `feat/metrics-ir` instead of `main`. PR #3 was squash-merged and its
+  branch deleted, which left GitHub reporting #6 as "MERGED" — into a branch that no longer exists.
+  `gh pr list` showed six merged PRs and main had five of their diffs. The work survived only on
+  `origin/feat/metrics-calibration` at `db0b9d7`; had that remote branch been pruned too, ECE, Brier,
+  `reliability_bins` and AUROC would have been gone, and H2/H3 depend on all four.
+  **Rule going forward: every PR targets `main` directly. No stacked PRs.**
+- **The gap was found by a Sonnet worker refusing to improvise.** It tried `from src.metrics import
+  ece`, did not find it, and stopped rather than inventing a metric or editing `metrics.py`. Worth
+  noting because it is evidence the brief-plus-review split works: an orchestrator reading a plan that
+  says "import ece" would likely have assumed it existed.
+- Earlier session note stands: `gh pr merge` is blocked by the environment's classifier. All merges
+  need the user.
+
+**Numbers:** 81 tests passing on the Task 9 branch (which includes #11's 8 calibration tests). No API
+call has been made yet; nothing measured.
+
+**Next:** merge #10 and #11, rebase the Task 9 branch onto the new main, re-verify, then PR it. Then
+Task 10 (arm B, cross-encoder) to a Sonnet worker.
+
+**Open:**
+- Still unanswered: FiQA 300-sampled vs full 648, and the 0.35/0.65 composition weights.
+- `results/report.md` owes a restatement of H1-H7 now that `BRD.md` is unpublished.
+
+---
+
 ## 2026-09-20 — Tasks 5 and 8: stats and embeddings
 
 **State:** Tasks 1, 2, 6, 7 merged. Task 3 (IR metrics, PR #3), Task 4 (calibration metrics, PR #6),
