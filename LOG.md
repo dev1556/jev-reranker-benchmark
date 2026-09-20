@@ -33,6 +33,55 @@ out to be, what numbers were observed, and which dead ends are not worth walking
 
 ---
 
+## 2026-09-20 — Tasks 5 and 8: stats and embeddings
+
+**State:** Tasks 1, 2, 6, 7 merged. Task 3 (IR metrics, PR #3), Task 4 (calibration metrics, PR #6),
+Task 5 (stats, PR #7) and Task 8 (embeddings, PR #8) are all open. #3/#6/#7 are held for human
+review by rule (metrics/stats). #8 is green and routine but the merge command was blocked by the
+sandbox classifier, so it is waiting on the user too.
+
+**Did:** Finished the half-written `src/stats.py` + tests found uncommitted in the `rr-stats`
+worktree (10 tests, all passing), rebased it onto main, raised PR #7. Then implemented Task 8
+(`src/embed.py`, 10 tests) in `rr-embed` and raised PR #8.
+
+**Decided:**
+
+- **`FakeEmbedder` seeds from a `blake2b` digest, not `hash(t)`.** The plan's code used Python's
+  `hash()`, which is salted per process, so every fixture candidate pool would silently differ
+  between runs. The plan's own determinism test would not have caught it — it compares two calls
+  inside one process. Added `test_fake_embedder_is_stable_across_instances`.
+- **`test_cosine_is_magnitude_invariant` now asserts the real order** (`["long", "short"]`, fixed by
+  the doc_id tiebreak). As written in the plan it asserted `result[0] in {"long", "short"}`, which is
+  true for every possible output — a test that could never fail.
+- **Dropped a `cfg_pool_hint()` helper** that existed only to interpolate the pool size into an
+  assertion message. A function per error string is not worth the read.
+- **`assert_pools_identical` stays a runtime check.** FR-2: one divergent document turns this from a
+  reranking benchmark into a retrieval benchmark, and nothing downstream would notice.
+
+**Broke / learned:**
+
+- **PR #6 shows "no checks reported" and that is correct, not a CI failure.** It targets
+  `feat/metrics-ir`, and the workflow triggers only on `pull_request: branches: [main]`. It will run
+  once #3 merges and #6 retargets. Do not go hunting for a broken workflow again.
+- `gh pr merge` is blocked by the auto-mode classifier in this environment. Any merge needs the user.
+- Long heredocs through Bash still work for Python and file writes; the earlier failure was markdown
+  specific. Writing LOG entries via a small inline Python script is reliable.
+
+**Numbers:** None measured — no arm exists yet and no API call has been made. Test suite: 36 passing
+on both branches.
+
+**Next:** Merge #3 → #6 → #7 → #8 (human review on the first three), then Task 9 (reranker protocol,
+arm A cosine, arm E Platt) in a fresh worktree.
+
+**Open:**
+- Four PRs waiting on the user; three of them by design, #8 only because of the merge block.
+- `rr-stats`, `rr-metrics-ir`, `rr-metrics-cal`, `rr-embed` worktrees must be removed after their PRs
+  merge — `git worktree list` currently shows five entries and should show one.
+- Still unanswered from the last session: FiQA 300-sampled vs full 648, and the 0.35/0.65 composition
+  weights, which remain a guess until the dev tuning pass.
+
+---
+
 ## 2026-09-19 — Implementation plan written
 
 **State:** BRD approved. `CLAUDE.md`, `ARCHITECTURE.md`, `TECH_REQUIREMENTS.md` and a 19-task
