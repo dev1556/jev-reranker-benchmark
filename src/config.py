@@ -29,7 +29,7 @@ class Config:
     # --- stamps ---
     PROMPT_VERSION: str = "v1"
     EMBED_MODEL: str = "text-embedding-3-small"
-    LLM_MODEL: str = "claude-haiku-4-5-20251001"
+    LLM_MODEL: str = "claude-haiku-4-5"
     JEV_MODEL: str = "jev-latest"
     CROSS_ENCODER: str = "BAAI/bge-reranker-base"
 
