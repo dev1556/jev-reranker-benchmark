@@ -4,12 +4,16 @@ score orders the ranking; p_relevant is a probability claim the calibration
 metrics hold the arm to. They are separate fields on purpose - see types.py.
 """
 
+import re
+import time
 from collections.abc import Sequence
 from typing import Protocol
 
 import numpy as np
 
+from src.cache import ResponseCache, cache_key
 from src.config import Config
+from src.prompts import LLM_RERANK_PROMPT
 from src.types import Doc, Query, Scored
 
 
@@ -176,4 +180,160 @@ class CrossEncoderReranker:
             )
             for d, logit, p in zip(candidates, logits, probs, strict=True)
         ]
+        return sorted(scored, key=lambda s: (-s.score, s.doc_id))
+
+
+_GRADE_RE = re.compile(r"\b([0-9]+)\b")
+
+
+def parse_llm_score(text: str) -> int:
+    """Extract the 0-3 grade from a raw LLM reply.
+
+    Raises on anything unparseable or out of range - never defaults. A
+    silently-defaulted grade is an invisible wrong number in a public chart
+    (CLAUDE.md non-negotiable #3: every reported number must be trustworthy).
+    """
+    match = _GRADE_RE.search(text)
+    if match is None:
+        raise ValueError(f"no grade found in LLM reply: {text!r}")
+    grade = int(match.group(1))
+    if not 0 <= grade <= 3:
+        raise ValueError(f"grade {grade} outside 0-3 in reply: {text!r}")
+    return grade
+
+
+class AnthropicMessages(Protocol):
+    def create(self, **kwargs: object) -> object: ...
+
+
+class AnthropicClient(Protocol):
+    """Duck-typed contract for whatever `LLMReranker.client` holds: the real
+    `anthropic.Anthropic()` in production, a fake in tests."""
+
+    messages: AnthropicMessages
+
+
+class LLMReranker:
+    """Arm C. Pointwise 0-3 grading by cfg.LLM_MODEL (Claude Haiku), one call
+    per (query, doc) pair.
+
+    p_relevant = grade / 3. Anthropic exposes no logprobs, so this
+    pseudo-probability is exactly the uncalibrated-artefact shape hypothesis
+    H2 critiques - it is a rescaled ordinal judgment, not a probability the
+    model actually estimated. confidence is None because the arm genuinely
+    has no such signal; faking one would misrepresent the comparison.
+
+    Equal-effort rule: this rubric (src/prompts.py) gets the same care as
+    arm D's - a lazy rival prompt would make any win by the arm under test
+    meaningless.
+
+    Every failure path - API exception, no text block in the reply, or a
+    reply truncated at max_tokens - is recorded as data (meta["error"]) and
+    excluded (meta["excluded"] = True), never scored 0.0. A silent zero would
+    depress this arm's metrics in a way nobody would spot in a CSV.
+    """
+
+    name = "llm"
+
+    def __init__(
+        self,
+        cfg: Config,
+        cache: ResponseCache,
+        client: AnthropicClient | None = None,
+        dataset: str = "",
+    ) -> None:
+        self.cfg = cfg
+        self.cache = cache
+        self.dataset = dataset
+        if client is None:
+            import os
+
+            import anthropic
+
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise RuntimeError("ANTHROPIC_API_KEY is not set; arm C needs it")
+            client = anthropic.Anthropic()
+        self.client = client
+
+    def _grade(self, query: Query, doc: Doc) -> dict:
+        """Run (or fetch from cache) one grading call. Returns either
+        {"grade": int, ...} on success or {"error": str, ...} on any failure -
+        callers must branch on "error" in the result, never assume "grade"."""
+        key = cache_key(
+            self.name,
+            self.cfg.LLM_MODEL,
+            self.dataset,
+            query.query_id,
+            doc.doc_id,
+            self.cfg.PROMPT_VERSION,
+        )
+        cached = self.cache.get(key, arm=self.name)
+        if cached is not None:
+            return cached
+        prompt = LLM_RERANK_PROMPT.format(query=query.text, document=doc.text[:4000])
+        started = time.perf_counter()
+        try:
+            # No `thinking` param: Haiku 4.5 only thinks if explicitly told to,
+            # and this call wants a bare digit, not reasoning tokens.
+            resp = self.client.messages.create(
+                model=self.cfg.LLM_MODEL,
+                max_tokens=16,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            if resp.stop_reason == "max_tokens":
+                # The grade may be truncated mid-token; treat as unusable even
+                # if the partial text happens to look like a valid digit.
+                raise ValueError(f"reply truncated: stop_reason={resp.stop_reason!r}")
+            # content is a list of typed blocks (TextBlock, ThinkingBlock, ...);
+            # content[0] is not guaranteed to be text. A reply with no text
+            # block at all raises StopIteration, caught below like any other
+            # failure.
+            text = next(b.text for b in resp.content if b.type == "text")
+            payload = {
+                "grade": parse_llm_score(text),
+                "latency_s": time.perf_counter() - started,
+                "input_tokens": resp.usage.input_tokens,
+                "output_tokens": resp.usage.output_tokens,
+            }
+        except Exception as exc:  # recorded, never silently zeroed
+            payload = {
+                "error": f"{type(exc).__name__}: {exc}",
+                "latency_s": time.perf_counter() - started,
+            }
+        # Failures are cached too, deliberately. The published reproduce path is
+        # `git lfs pull && make report` with no API keys; an uncached failure
+        # would make a warm-cache run attempt a live call, and without a key
+        # this class raises at construction, so the whole reproduction dies on
+        # one historical 503. A cached failure keeps the run offline and
+        # byte-identical (NFR-5) and keeps the error itself auditable.
+        # Retrying a transient fault is therefore an explicit human action:
+        # delete those cache entries and re-run the arm.
+        self.cache.put(key, payload, arm=self.name)
+        return payload
+
+    def rerank(self, query: Query, candidates: Sequence[Doc]) -> list[Scored]:
+        scored: list[Scored] = []
+        for doc in candidates:
+            r = self._grade(query, doc)
+            if "error" in r:
+                scored.append(
+                    Scored(
+                        doc_id=doc.doc_id,
+                        score=float("-inf"),
+                        p_relevant=0.0,
+                        confidence=None,
+                        meta={**r, "excluded": True},
+                    )
+                )
+            else:
+                grade = r["grade"]
+                scored.append(
+                    Scored(
+                        doc_id=doc.doc_id,
+                        score=float(grade),
+                        p_relevant=grade / 3.0,
+                        confidence=None,
+                        meta=r,
+                    )
+                )
         return sorted(scored, key=lambda s: (-s.score, s.doc_id))
